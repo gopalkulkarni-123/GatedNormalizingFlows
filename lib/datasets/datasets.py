@@ -7,6 +7,15 @@ from torch.utils.data import Dataset
 
 from .cloud_sampling import sample_cloud
 
+class AirplaneData(Dataset):
+    def __init__(self, dictionary_list):
+        self.dictionary_list = dictionary_list
+
+    def __getitem__(self, index):
+        return self.dictionary_list[index]
+
+    def __len__(self):
+        return len(self.dictionary_list)
 
 class ShapeNetCoreDataset(Dataset):
     def __init__(self, path2data, part='train', meshes_fname='meshes.h5',

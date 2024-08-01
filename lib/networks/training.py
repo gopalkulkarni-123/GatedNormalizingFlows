@@ -4,14 +4,35 @@ from sys import stdout
 import torch
 import h5py as h5
 import numpy as np
+from mpl_toolkits import mplot3d
+import matplotlib.pyplot as plt
+import sys
+#import wandb
+import psutil
 
 from lib.networks.utils import AverageMeter, save_model
 from lib.visualization.utils import add_figures_reconstruction_tb, add_svr_reconstruction_tb
+#from evaluate_ae import eval_main
+#from visualization import visualize
 
+def plot(dataset, title):
+    for i in range(len(dataset)):
+        dataset = dataset.cpu()
+        dataset_plot = dataset.detach().numpy()
+        fig = plt.figure(figsize=(10,10))
+        ax = fig.add_subplot(111, projection='3d')
+        ax.set_title(title)
 
-def train(iterator, model, loss_func, optimizer, scheduler, epoch, iter, warmup, train_writer, **kwargs):
+        ax.scatter(dataset_plot[0],dataset_plot[1],dataset_plot[2])
+
+        #ax.scatter(dataset_1[0], dataset_1[1], dataset_1[2])
+        #ax.scatter(dataset_2[0], dataset_2[1], dataset_2[2])
+        plt.show()
+
+def train(iterator, model, loss_func, optimizer, scheduler, epoch, iter, warmup, **kwargs):
     num_workers = kwargs.get('num_workers')
     train_mode = kwargs.get('train_mode')
+    cond_type = kwargs.get('cond_type')
     model_name = os.path.join(kwargs['logging_path'], kwargs.get('model_name'))
 
     batch_time = AverageMeter()
@@ -27,18 +48,29 @@ def train(iterator, model, loss_func, optimizer, scheduler, epoch, iter, warmup,
 
     end = time.time()
 
+#for loop starts
     for i, batch in enumerate(iterator):
+        """
         if iter + i >= len(iterator):
             break
+        """
         data_time.update(time.time() - end)
         scheduler(optimizer, epoch, iter + i)
 
+        #print("iteration number is",i)
         g_clouds = batch['cloud'].cuda(non_blocking=True)
         p_clouds = batch['eval_cloud'].cuda(non_blocking=True)
+        if cond_type == 'continuous':
+            #cloud_labels = batch['cont_label'].unsqueeze(1).cuda(non_blocking=True)
+            cloud_labels = batch['cont_label'].cuda(non_blocking=True)
+        if cond_type == 'discrete':
+            cloud_labels = batch['disc_label'].cuda(non_blocking=True)
+        #plot(g_clouds, 'g_clouds')
+        #plot(p_clouds, 'p_clouds')
         # returns shape distributions list in prior flows, samples list in decoder flows
         # and log weights of all flows in decoder flows.
-        output_prior, output_decoder, mixture_weights_logits = model(g_clouds, p_clouds, images=None, n_sampled_points=None, labeled_samples=False, warmup=warmup)
-
+        output_prior, output_decoder, mixture_weights_logits = model(g_clouds, p_clouds, cloud_labels, images=None, n_sampled_points=None, labeled_samples=False, warmup=False)
+               
         loss, pnll, gnll, gent = loss_func(output_prior, output_decoder, mixture_weights_logits)
         with torch.no_grad():
             if torch.isnan(loss):
@@ -50,10 +82,63 @@ def train(iterator, model, loss_func, optimizer, scheduler, epoch, iter, warmup,
         GENT.update(gent.item(), g_clouds.shape[0])
         LB.update((pnll + gnll - gent).item(), g_clouds.shape[0])
 
+        #"""
         optimizer.zero_grad()
+            
+        #start_time = time.time()
         loss.backward()
         optimizer.step()
+        #end_time = time.time()
+        memory_usage = psutil.Process().memory_info().rss / (1024 ** 2)
+        #wandb.log({"backprop_time": end_time - start_time})
+        #wandb.log({"memory_consumption": memory_usage})
+        #"""
+        
+        """
+        backprop_criteria = int(epoch / 200) + 1
+        if backprop_criteria <= 5:
+            backprop_criteria = backprop_criteria
+        else:
+            backprop_criteria = 5
 
+        if epoch % backprop_criteria == 0:
+            for param in model.pc_decoder.parameters():
+                param.requires_grad = True
+                
+            for param in model.pc_encoder.parameters():
+                param.requires_grad = True
+            
+            optimizer.zero_grad()
+                        
+            start_time = time.time()
+            loss.backward()
+
+            optimizer.step()
+
+            end_time = time.time()
+            memory_usage = psutil.Process().memory_info().rss / (1024 ** 2)
+            #wandb.log({"backprop_time": end_time - start_time})
+            #wandb.log({"memory_consumption": memory_usage})
+        
+        else:
+            for param in model.pc_decoder.parameters():
+                param.requires_grad = False
+                
+            for param in model.pc_encoder.parameters():
+                param.requires_grad = True
+
+            optimizer.zero_grad()
+            
+            start_time = time.time()
+            loss.backward()
+            optimizer.step()
+            end_time = time.time()
+
+            memory_usage = psutil.Process().memory_info().rss / (1024 ** 2)
+            #wandb.log({"backprop_time": end_time - start_time})
+            #wandb.log({"memory_consumption": memory_usage})
+        """
+        
         batch_time.update(time.time() - end)
         if (iter + i + 1) % (num_workers) == 0 and kwargs['logging']:
             line = 'Epoch: [{0}][{1}/{2}]'.format(epoch + 1, iter + i + 1, len(iterator))
@@ -79,13 +164,19 @@ def train(iterator, model, loss_func, optimizer, scheduler, epoch, iter, warmup,
                 'model_state': sd,
                 'optimizer_state': optimizer.state_dict()
             }, model_name)
+        
+        #if ((epoch % 10) == 0) & (epoch != 0):
+        #    eval_main("eight_spiked_star_eight_decs", 'intermediate_eight_spiked_star_eight_decs_{}'.format(epoch))
+        #    visualize('intermediate_eight_spiked_star_eight_decs_{}'.format(epoch))
+        
+#for loop ends
 
     # write to tensorboard
-    if kwargs['logging']:
-        train_writer.add_scalar('train/loss', LB.avg, epoch)
-        train_writer.add_scalar('train/PNLL', PNLL.avg, epoch)
-        train_writer.add_scalar('train/GNLL', GNLL.avg, epoch)
-        train_writer.add_scalar('train/GENT', GENT.avg, epoch)
+    #if kwargs['logging']:
+        #train_writer.add_scalar('train/loss', LB.avg, epoch)
+        #train_writer.add_scalar('train/PNLL', PNLL.avg, epoch)
+        #train_writer.add_scalar('train/GNLL', GNLL.avg, epoch)
+        #train_writer.add_scalar('train/GENT', GENT.avg, epoch)
 
     if kwargs['logging']:
         if kwargs['distributed']:
@@ -96,7 +187,7 @@ def train(iterator, model, loss_func, optimizer, scheduler, epoch, iter, warmup,
             'epoch': epoch + 1,
             'iter': 0,
             'model_state': sd,
-            'optimizer_state': optimizer.state_dict()
+            'optimzer_state': optimizer.state_dict()
         }, model_name)
 
 
@@ -116,6 +207,7 @@ def eval(iterator, model, loss_func, optimizer, epoch, iter, warmup, min_loss, e
             break
         g_clouds = batch['cloud'].cuda(non_blocking=True)
         p_clouds = batch['eval_cloud'].cuda(non_blocking=True)
+        #label = batch['label']
         output_prior, output_decoder, mixture_weights_logits = model(g_clouds, p_clouds, images=None, n_sampled_points=None, labeled_samples=False, warmup=warmup)
 
         with torch.no_grad():
@@ -165,7 +257,7 @@ def eval(iterator, model, loss_func, optimizer, epoch, iter, warmup, min_loss, e
         all_gts = all_gts.detach().cpu().numpy()
 
         add_figures_reconstruction_tb(all_gts, all_samples, all_labels, eval_writer, epoch)
-
+    """
     if LB.avg < min_loss:
         min_loss = LB.avg
         best_modelname = 'best_model_' + kwargs.get('model_name')
@@ -181,6 +273,7 @@ def eval(iterator, model, loss_func, optimizer, epoch, iter, warmup, min_loss, e
                 'model_state': sd,
                 'optimizer_state': optimizer.state_dict()
             }, best_model_name)
+    """
     return min_loss
 
 

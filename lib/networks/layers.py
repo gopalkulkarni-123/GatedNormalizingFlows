@@ -43,3 +43,37 @@ class SharedDot(nn.Module):
             output.add_(self.bias.unsqueeze(0).unsqueeze(3))
         output.squeeze_(1)
         return output
+
+class SharedDotPrior(nn.Module):
+    def __init__(self, in_features, out_features, bias=False,
+                 init_weight=None, init_bias=None):
+        super(SharedDotPrior, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        #self.n_channels = n_channels
+        self.init_weight = init_weight
+        self.init_bias = init_bias
+        self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
+        if bias:
+            self.bias = nn.Parameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.init_weight:
+            nn.init.uniform_(self.weight.data, a=-self.init_weight, b=self.init_weight)
+        else:
+            nn.init.kaiming_uniform_(self.weight.data, a=0.)
+        if self.bias is not None:
+            if self.init_bias:
+                nn.init.constant_(self.bias.data, self.init_bias)
+            else:
+                nn.init.constant_(self.bias.data, 0.)
+
+    def forward(self, input):
+        output = torch.matmul(self.weight, input.unsqueeze(2))
+        if self.bias is not None:
+            output.add_(self.bias.unsqueeze(1))
+        output.squeeze_(2)
+        return output

@@ -1,14 +1,33 @@
 import torch
 import torch.nn as nn
+import numpy as np
+#import wandb
 
+
+import numpy as np
+from mpl_toolkits import mplot3d
+import matplotlib.pyplot as plt
 from .resnet import resnet18
 
 from .encoders import PointNetCloudEncoder
 from .encoders import FeatureEncoder
 
-from .decoders import GlobalRNVPDecoder
+from .decoders import ConditionalPriorDecoder
 from .decoders import LocalCondRNVPDecoder
+from .decoders import GlobalRNVPDecoder
 
+"""
+def category_condition(data, num_categories, cloud_labels):
+
+    data = data.cpu()
+    zeros = torch.zeros(data.shape[0], num_categories)
+    zeros[torch.arange(data.shape[0]), cloud_labels.long()] = 1
+    data[:, -num_categories:] = zeros
+    data = data.to('cuda:0')
+    #zeros = zeros.to('cuda:0')
+
+    return data
+"""
 
 class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
     '''
@@ -41,13 +60,22 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
         self.deterministic = kwargs.get('deterministic')
 
         self.pc_enc_init_n_channels = kwargs.get('pc_enc_init_n_channels')
+        
         self.pc_enc_init_n_features = kwargs.get('pc_enc_init_n_features')
+        #self.pc_enc_init_n_features = wandb.config.pc_enc_init_n_features
+        
         self.pc_enc_n_features = kwargs.get('pc_enc_n_features')
+        #self.pc_enc_n_features = [wandb.config.pc_encoder_0, 2*wandb.config.pc_encoder_0, 4*wandb.config.pc_encoder_0]
 
         self.g_latent_space_size = kwargs.get('g_latent_space_size')
 
-        self.g_prior_n_flows = kwargs.get('g_prior_n_flows')
-        self.g_prior_n_features = kwargs.get('g_prior_n_features')
+        self.g_prior_n_flows_prior = kwargs.get('g_prior_n_flows')
+        #self.g_prior_n_flows_prior = wandb.config.g_prior_n_flows
+
+        self.g_prior_n_features_prior = kwargs.get('g_prior_n_features')
+        #self.g_prior_n_features_prior = wandb.config.g_prior_n_features
+
+        self.c_prior_dims = kwargs.get('c_prior_dims')
 
         self.g_posterior_n_layers = kwargs.get('g_posterior_n_layers')
 
@@ -55,7 +83,11 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
         self.p_prior_n_layers = kwargs.get('p_prior_n_layers')
 
         self.p_decoder_n_flows = kwargs.get('p_decoder_n_flows')
+        #self.p_decoder_n_flows = wandb.config.p_decoder_n_flows
+        
         self.p_decoder_n_features = kwargs.get('p_decoder_n_features')
+        #self.p_decoder_n_features = wandb.config.p_decoder_n_features       
+
         self.p_decoder_base_type = kwargs.get('p_decoder_base_type')
         self.p_decoder_base_var = kwargs.get('p_decoder_base_var')
 
@@ -69,8 +101,11 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
             nn.init.normal_(self.g0_prior_mus.data, mean=0.0, std=0.033)
             nn.init.normal_(self.g0_prior_logvars.data, mean=0.0, std=0.33)
 
-        self.g_prior = GlobalRNVPDecoder(self.g_prior_n_flows, self.g_prior_n_features,
-                                         self.g_latent_space_size, weight_std=0.01)
+        self.g_prior = ConditionalPriorDecoder(self.g_prior_n_flows_prior, self.g_prior_n_features_prior,
+                                               self.c_prior_dims, self.g_latent_space_size, weight_std=0.01)
+        
+        #self.g_prior = GlobalRNVPDecoder(self.g_prior_n_flows_prior, self.g_prior_n_features_prior,
+        #                                 self.g_latent_space_size, weight_std=0.01)
 
         self.g_posterior = FeatureEncoder(self.g_posterior_n_layers, self.pc_enc_n_features[-1],
                                           self.g_latent_space_size, deterministic=False,
@@ -108,7 +143,7 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
         eps = torch.randn_like(std)
         return eps.mul(std).add_(mu)
 
-    def encode(self, g_input):
+    def encode(self, g_input, cloud_labels):
         '''
         function to encode prior flow
 
@@ -123,8 +158,10 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
         output = {}
         output['g_prior_mus'] = [self.g0_prior_mus.expand(g_input.shape[0], self.g_latent_space_size)]
         output['g_prior_logvars'] = [self.g0_prior_logvars.expand(g_input.shape[0], self.g_latent_space_size)]
+ 
         if self.mode == 'training' or self.mode == 'autoencoding':
             p_enc_features = self.pc_encoder(g_input)
+            #g_enc_features = torch.max(p_enc_features, dim=2) 
             g_enc_features = torch.max(p_enc_features, dim=2)[0]
 
             # get posterior distribution from point cloud features
@@ -134,14 +171,18 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
 
             # train prior flow / auto-encoding task get prior distribution
             # g_prior_samples represents list of output transformations after couping layers
-            buf_g = self.g_prior(output['g_posterior_samples'], mode='inverse')
+            #condition = torch.rand((g_input.shape[0], self.c_prior_dims)).cuda()
+            buf_g = self.g_prior(output['g_posterior_samples'], cloud_labels.to(dtype=torch.float32), mode='inverse')
+            #buf_g = self.g_prior(output['g_posterior_samples'], mode='inverse')
             # inverse training, the last layer is the g_posterior_samples computed from the input
             # point cloud, used for loss computation.
             output['g_prior_samples'] = buf_g[0] + [output['g_posterior_samples']]
         elif self.mode == 'generating':
             # generation task, get prior distribution
             output['g_prior_samples'] = [self.reparameterize(output['g_prior_mus'][0], output['g_prior_logvars'][0])]
-            buf_g = self.g_prior(output['g_prior_samples'][0], mode='direct')
+            #condition = torch.rand((g_input.shape[0], self.c_prior_dims)).cuda()
+            buf_g = self.g_prior(output['g_prior_samples'][0], cloud_labels.to(dtype=torch.float32), mode='direct')
+            #buf_g = self.g_prior(output['g_prior_samples'][0], mode='direct')
             # direct transformation, the last layer is the predicted sample distribution
             output['g_prior_samples'] += buf_g[0]
         # g_prior_logvars returns the list of prior logvars generated after coupling layers
@@ -155,8 +196,8 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
         decode flow for one flow only
 
         Args:
-            p_input: input point cloud
-            g_sample: another input point cloud resampled from the same point cloud like p_input
+            p_input: input point cloud of size (3, 2048)
+            g_sample: another input point cloud resampled from the same point cloud like p_input of size 128
             pc_decoder: decoder flow
             n_sampled_points: number of points need to be sampled
 
@@ -194,17 +235,22 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
 
         if self.mode == 'training':
             #train decoder flow
+            #g_sample_labeled = category_condition(g_sample, 8, cloud_labels)
             buf = pc_decoder(p_input, g_sample, mode='inverse')
             output['p_prior_samples'] = buf[0] + [p_input]
         else:
             # for evaluation
             output['p_prior_samples'] = [self.reparameterize(output['p_prior_mus'][0], output['p_prior_logvars'][0])]
+            #g_sample_labeled = category_condition(g_sample, 8, cloud_labels)
             buf = pc_decoder(output['p_prior_samples'][0], g_sample, mode='direct')
             output['p_prior_samples'] += buf[0]
         output['p_prior_mus'] += buf[1]
         output['p_prior_logvars'] += buf[2]
 
         return output
+    
+    def show(self):
+        print("Local_Cond_RNVP_MC_Global_RNVP_VAE()")
 
     '''
     def decode(self, p_input, g_sample, n_sampled_points):
@@ -221,7 +267,7 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
 
         return self.one_flow_decode(p_input, g_sample, self.pc_decoder, n_sampled_points)
     '''
-    def forward(self, g_input, p_input, images=None, n_sampled_points=None, labeled_samples=False, warmup=False):
+    def forward(self, g_input, p_input, cloud_labels, images=None, n_sampled_points=None, labeled_samples=False, warmup=False):
         '''
         main function
 
@@ -240,19 +286,22 @@ class Local_Cond_RNVP_MC_Global_RNVP_VAE(nn.Module):
             output_decoder: samples list after decoder flow
             mixture_weights_logits: log weight of each flow.
         '''
-
+        #print("p_input is ", p_input.size())
+        #print("g_input is ", g_input.size())
+        #plot(p_input, 'p_input before')
         sampled_cloud_size = p_input.shape[2] if n_sampled_points is None else n_sampled_points
         if images is not None and self.train_mode == 'p_rnvp_mc_g_rnvp_vae_ic':
             #for svr task
             output_encoder = self.encode(g_input, images)
         else:
             #for generation/auto-encoding task
-            output_encoder = self.encode(g_input)
+            output_encoder = self.encode(g_input, cloud_labels)
         g_sample = output_encoder['g_posterior_samples'] if self.mode == 'training' or self.mode == 'autoencoding' \
             else output_encoder['g_prior_samples'][-1]
         if labeled_samples:
             samples, labels, mixture_weights_logits = self.decode(p_input, g_sample, sampled_cloud_size, labeled_samples, warmup)
             return output_encoder, samples, labels, mixture_weights_logits
         else:
+            #print("decoding")
             output_decoder, mixture_weights_logits = self.decode(p_input, g_sample, sampled_cloud_size, labeled_samples, warmup)
             return output_encoder, output_decoder, mixture_weights_logits

@@ -2,10 +2,12 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+#import wandb
 from lib.networks.models import Local_Cond_RNVP_MC_Global_RNVP_VAE
 from lib.networks.decoders import LocalCondRNVPDecoder
 from lib.networks.resnet import resnet18
 from lib.networks.encoders import FeatureEncoder, WeightsEncoder
+
 
 
 class Flow_Mixture_Model(Local_Cond_RNVP_MC_Global_RNVP_VAE):
@@ -28,7 +30,9 @@ class Flow_Mixture_Model(Local_Cond_RNVP_MC_Global_RNVP_VAE):
         super(Flow_Mixture_Model, self).__init__(**kwargs)
         self.n_components = kwargs['n_components']
         self.params_reduce_mode = kwargs['params_reduce_mode']
-        self.weights_type = kwargs['weights_type']
+        #self.params_reduce_mode = wandb.config.params_reduce_mode
+        self.weights_type = 'learned_weights'
+        #self.input_dims = kwargs['p_latent_space_size']
         self.mixture_weights_logits = torch.nn.Parameter(torch.zeros(self.n_components), requires_grad=True)
         p_decoder_n_flows, p_decoder_n_features = self._get_decoder_params()
         self.pc_decoder = nn.ModuleList([LocalCondRNVPDecoder(p_decoder_n_flows,
@@ -36,11 +40,12 @@ class Flow_Mixture_Model(Local_Cond_RNVP_MC_Global_RNVP_VAE):
                                                               self.g_latent_space_size,
                                                               weight_std=0.01) for _ in range(self.n_components)])
         
-        self.mixture_weights_encoder = WeightsEncoder(3, self.g_latent_space_size,
+        self.mixture_weights_encoder = WeightsEncoder(4, self.g_latent_space_size,
                                           self.n_components, deterministic=True,
                                           mu_weight_std=0.001, mu_bias=0.0,
                                           logvar_weight_std=0.01, logvar_bias=0.0)
     
+
     def _get_decoder_params(self):
         '''
         according to different params reduce mode, decide feature size and number of coupling layers.
@@ -54,7 +59,9 @@ class Flow_Mixture_Model(Local_Cond_RNVP_MC_Global_RNVP_VAE):
         else:  # if n != compute reduced params
             if self.params_reduce_mode == 'depth_and_feature':
                 decoder_depth = math.ceil(self.p_decoder_n_flows / math.sqrt(n))
+                print("decoder_depth is ", decoder_depth)
                 p_decoder_n_features, _ = self._get_p_decoder_n_features(decoder_depth)
+                print("p_decoder_n_features is",p_decoder_n_features)
             elif self.params_reduce_mode == 'depth_first':
                 # we ceil to ensure minimum depth 1 in regular cases
                 decoder_depth = math.ceil(self.p_decoder_n_flows / n)
@@ -112,10 +119,12 @@ class Flow_Mixture_Model(Local_Cond_RNVP_MC_Global_RNVP_VAE):
         Returns:
             mixture_weights_logits: log weights of each flow in decoder flows.
         '''
-        if warmup or self.weights_type == 'global_weights':
+        if self.weights_type == 'global_weights':
             mixture_weights_logits = self.mixture_weights_logits.unsqueeze(0).expand(g_sample.shape[0], self.n_components)
         elif self.weights_type == 'learned_weights':
             mixture_weights_logits = self.mixture_weights_encoder(g_sample)
+            #weight_value = -1.3500
+            #mixture_weights_logits = mixture_weights_logits*0 + weight_value
         
         return mixture_weights_logits
 
@@ -138,14 +147,14 @@ class Flow_Mixture_Model(Local_Cond_RNVP_MC_Global_RNVP_VAE):
             mixture_weights_logits: weight of each flow
             output_decoder: output point clouds list
         '''
-        mixture_weights_logits = self.get_weights(g_sample, warmup)
+        mixture_weights_logits = self.get_weights(g_sample, warmup = False)
         if self.mode == 'training':
             sampled_cloud_size = [n_sampled_points for _ in range(self.n_components)]
         else:
             #when evaluation, each time, only one shape is inputed
             assert p_input.shape[0] == 1
-
             #computes the probabilities of all flows
+            a = mixture_weights_logits[0]
             logits_exp = np.exp(mixture_weights_logits[0].detach().cpu().numpy())
             probs = logits_exp / logits_exp.sum()
 
@@ -179,6 +188,7 @@ class Flow_Mixture_Model(Local_Cond_RNVP_MC_Global_RNVP_VAE):
             return output_decoder, mixture_weights_logits
 
 class Flow_Mixture_SVR_Model(Flow_Mixture_Model):
+
     ''' Train class for flow mixture model for single view reconstruction
     Args:
         img_encoder: encoder used for encoding image
